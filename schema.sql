@@ -1,4 +1,6 @@
 CREATE TABLE IF NOT EXISTS processed (
   ft TEXT PRIMARY KEY,
+  fn TEXT NOT NULL,
+  img_url TEXT NOT NULL,
   created_at TEXT NOT NULL
 );

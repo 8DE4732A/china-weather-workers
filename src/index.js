@@ -7,6 +7,19 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(handleScheduled(env));
   },
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    if (url.pathname === "/") {
+      return servePage();
+    }
+    if (url.pathname === "/api/list") {
+      return listFrames(env.DB, url);
+    }
+    if (url.pathname === "/img") {
+      return proxyImage(url, ctx);
+    }
+    return new Response("Not Found", { status: 404 });
+  },
 };
 
 async function handleScheduled(env) {
@@ -23,17 +36,17 @@ async function handleScheduled(env) {
       continue;
     }
 
-    const alreadyProcessed = await isProcessed(env.DB, ft);
-    if (alreadyProcessed) {
-      continue;
-    }
-
     const imgUrl =
       "https://pi.weather.com.cn/i/product/pic/m/sevp_nsmc_" +
       radar.fn +
       "_lno_py_" +
       ft +
       ".jpg";
+
+    const alreadyProcessed = await isProcessed(env.DB, ft);
+    if (alreadyProcessed) {
+      continue;
+    }
 
     try {
       await uploadImageToDrive({
@@ -42,7 +55,7 @@ async function handleScheduled(env) {
         fileName: `${ft}.jpg`,
         imgUrl,
       });
-      await markProcessed(env.DB, ft);
+      await markProcessed(env.DB, { ft, fn: radar.fn, imgUrl });
       console.log(`Uploaded ${ft}.jpg`);
     } catch (err) {
       console.log(`Failed ${ft}.jpg: ${err?.message || err}`);
@@ -88,10 +101,12 @@ async function isProcessed(db, ft) {
   return !!result;
 }
 
-async function markProcessed(db, ft) {
+async function markProcessed(db, { ft, fn, imgUrl }) {
   await db
-    .prepare("INSERT OR IGNORE INTO processed (ft, created_at) VALUES (?, ?)")
-    .bind(ft, new Date().toISOString())
+    .prepare(
+      "INSERT OR IGNORE INTO processed (ft, fn, img_url, created_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(ft, fn, imgUrl, new Date().toISOString())
     .run();
 }
 
@@ -253,4 +268,148 @@ async function uploadImageToDrive({ accessToken, folderId, fileName, imgUrl }) {
     const errorText = await uploadResp.text();
     throw new Error(`Drive upload failed: ${uploadResp.status} ${errorText}`);
   }
+}
+
+async function listFrames(db, url) {
+  const limitParam = Number(url.searchParams.get("limit") || "240");
+  const limit = Number.isFinite(limitParam)
+    ? Math.min(Math.max(limitParam, 1), 1000)
+    : 240;
+
+  const rows = await db
+    .prepare(
+      "SELECT ft, img_url, created_at FROM processed ORDER BY ft DESC LIMIT ?",
+    )
+    .bind(limit)
+    .all();
+
+  return new Response(JSON.stringify(rows.results || []), {
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+async function proxyImage(url, ctx) {
+  const imgUrl = url.searchParams.get("url");
+  if (!imgUrl) {
+    return new Response("Missing url", { status: 400 });
+  }
+
+  const target = new URL(imgUrl);
+  if (target.hostname !== "pi.weather.com.cn") {
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  const cache = caches.default;
+  const cacheKey = new Request(url.toString(), { method: "GET" });
+  const cached = await cache.match(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const resp = await fetch(target.toString(), {
+    headers: {
+      Referer: REFERER,
+      "User-Agent": USER_AGENT,
+    },
+  });
+
+  if (!resp.ok) {
+    return new Response(`Image fetch failed: ${resp.status}`, {
+      status: resp.status,
+    });
+  }
+
+  const out = new Response(resp.body, resp);
+  out.headers.set("Cache-Control", "public, max-age=86400");
+  ctx.waitUntil(cache.put(cacheKey, out.clone()));
+  return out;
+}
+
+function servePage() {
+  const html = `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>云图播放</title>
+    <style>
+      :root { color-scheme: light; }
+      body { margin: 0; font-family: \"Noto Serif SC\", \"PingFang SC\", serif; background: #0b0f14; color: #e6eef6; }
+      .wrap { max-width: 960px; margin: 0 auto; padding: 24px; }
+      h1 { font-size: 24px; margin: 0 0 12px; }
+      .player { background: #121826; border-radius: 12px; padding: 12px; }
+      img { width: 100%; height: auto; display: block; border-radius: 8px; }
+      .meta { display: flex; gap: 12px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+      .meta span { opacity: 0.8; }
+      button { background: #2f9e44; color: #fff; border: 0; padding: 8px 14px; border-radius: 8px; cursor: pointer; }
+      button.secondary { background: #2b3648; }
+      input[type=\"range\"] { width: 140px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>卫星云图播放</h1>
+      <div class="player">
+        <img id="frame" alt="云图" />
+        <div class="meta">
+          <button id="toggle">暂停</button>
+          <button id="reload" class="secondary">刷新列表</button>
+          <label>间隔 <input id="speed" type="range" min="200" max="3000" step="100" value="1000" /></label>
+          <span id="status">加载中…</span>
+        </div>
+      </div>
+    </div>
+    <script>
+      const frame = document.getElementById('frame');
+      const status = document.getElementById('status');
+      const toggle = document.getElementById('toggle');
+      const reloadBtn = document.getElementById('reload');
+      const speed = document.getElementById('speed');
+      let list = [];
+      let idx = 0;
+      let timer = null;
+
+      function start() {
+        stop();
+        timer = setInterval(nextFrame, Number(speed.value));
+        toggle.textContent = '暂停';
+      }
+      function stop() {
+        if (timer) clearInterval(timer);
+        timer = null;
+        toggle.textContent = '播放';
+      }
+      function nextFrame() {
+        if (!list.length) return;
+        const item = list[idx];
+        const imgUrl = '/img?url=' + encodeURIComponent(item.img_url);
+        frame.src = imgUrl;
+        status.textContent = item.ft;
+        idx = (idx + 1) % list.length;
+      }
+      async function loadList() {
+        status.textContent = '加载中…';
+        const resp = await fetch('/api/list');
+        list = await resp.json();
+        idx = 0;
+        if (list.length) {
+          nextFrame();
+          start();
+        } else {
+          status.textContent = '暂无数据';
+        }
+      }
+      toggle.addEventListener('click', () => timer ? stop() : start());
+      reloadBtn.addEventListener('click', loadList);
+      speed.addEventListener('change', () => { if (timer) start(); });
+      loadList();
+    </script>
+  </body>
+</html>`;
+  return new Response(html, {
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+  });
 }
