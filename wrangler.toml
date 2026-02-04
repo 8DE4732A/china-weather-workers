@@ -1,0 +1,16 @@
+name = "china-weather-worker"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[triggers]
+crons = ["*/30 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "china-weather"
+database_id = "YOUR_D1_DATABASE_ID"
+
+[vars]
+GDRIVE_FOLDER_ID = "YOUR_GDRIVE_FOLDER_ID"
+GDRIVE_CLIENT_EMAIL = "YOUR_SERVICE_ACCOUNT_EMAIL"
+# GDRIVE_PRIVATE_KEY should be set via `wrangler secret put GDRIVE_PRIVATE_KEY`
