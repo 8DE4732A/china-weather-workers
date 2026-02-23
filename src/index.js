@@ -30,6 +30,7 @@ async function handleScheduled(env) {
   }
 
   const accessToken = await getAccessToken(env);
+  const folderId = await getOrCreateFolder(accessToken, "china_weather");
   for (const radar of radars) {
     const ft = radar.ft;
     if (!ft) {
@@ -51,7 +52,7 @@ async function handleScheduled(env) {
     try {
       await uploadImageToDrive({
         accessToken,
-        folderId: env.GDRIVE_FOLDER_ID,
+        folderId,
         fileName: `${ft}.jpg`,
         imgUrl,
       });
@@ -111,34 +112,10 @@ async function markProcessed(db, { ft, fn, imgUrl }) {
 }
 
 async function getAccessToken(env) {
-  const now = Math.floor(Date.now() / 1000);
-  const jwtHeader = { alg: "RS256", typ: "JWT" };
-  const jwtClaim = {
-    iss: env.GDRIVE_CLIENT_EMAIL,
-    scope: "https://www.googleapis.com/auth/drive.file",
-    aud: "https://oauth2.googleapis.com/token",
-    exp: now + 3600,
-    iat: now - 5,
-  };
-
-  const unsignedToken = `${base64UrlEncode(JSON.stringify(jwtHeader))}.${base64UrlEncode(
-    JSON.stringify(jwtClaim),
-  )}`;
-
-  const signature = await signJwt(unsignedToken, env.GDRIVE_PRIVATE_KEY);
-  const jwt = `${unsignedToken}.${signature}`;
-
-  const body = new URLSearchParams({
-    grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-    assertion: jwt,
-  });
-
-  const resp = await fetch("https://oauth2.googleapis.com/token", {
+  const resp = await fetch("https://ogd.richardxiong.com/api/access", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: body.toString(),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: env.GDRIVE_REFRESH_TOKEN }),
   });
 
   if (!resp.ok) {
@@ -150,63 +127,44 @@ async function getAccessToken(env) {
   return data.access_token;
 }
 
-async function signJwt(unsignedToken, privateKey) {
-  const pkcs8 = privateKey.replace(/\\n/g, "\n");
-  const binaryKey = pemToArrayBuffer(pkcs8);
+async function getOrCreateFolder(accessToken, folderName) {
+  const query = encodeURIComponent(
+    `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+  );
+  const searchResp = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id)`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
 
-  const key = await crypto.subtle.importKey(
-    "pkcs8",
-    binaryKey,
-    {
-      name: "RSASSA-PKCS1-v1_5",
-      hash: "SHA-256",
+  if (!searchResp.ok) {
+    const errorText = await searchResp.text();
+    throw new Error(`Folder search failed: ${searchResp.status} ${errorText}`);
+  }
+
+  const searchData = await searchResp.json();
+  if (searchData.files && searchData.files.length > 0) {
+    return searchData.files[0].id;
+  }
+
+  const createResp = await fetch("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
     },
-    false,
-    ["sign"],
-  );
+    body: JSON.stringify({
+      name: folderName,
+      mimeType: "application/vnd.google-apps.folder",
+    }),
+  });
 
-  const signature = await crypto.subtle.sign(
-    "RSASSA-PKCS1-v1_5",
-    key,
-    new TextEncoder().encode(unsignedToken),
-  );
-
-  return base64UrlEncode(signature);
-}
-
-function pemToArrayBuffer(pem) {
-  const pemHeader = "-----BEGIN PRIVATE KEY-----";
-  const pemFooter = "-----END PRIVATE KEY-----";
-  const pemContents = pem
-    .replace(pemHeader, "")
-    .replace(pemFooter, "")
-    .replace(/\s+/g, "");
-  const binary = atob(pemContents);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes.buffer;
-}
-
-function base64UrlEncode(value) {
-  let bytes;
-  if (typeof value === "string") {
-    bytes = new TextEncoder().encode(value);
-  } else if (value instanceof ArrayBuffer) {
-    bytes = new Uint8Array(value);
-  } else if (value instanceof Uint8Array) {
-    bytes = value;
-  } else {
-    throw new Error("Unsupported base64url input");
+  if (!createResp.ok) {
+    const errorText = await createResp.text();
+    throw new Error(`Folder create failed: ${createResp.status} ${errorText}`);
   }
 
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const folder = await createResp.json();
+  return folder.id;
 }
 
 async function uploadImageToDrive({ accessToken, folderId, fileName, imgUrl }) {

@@ -7,7 +7,7 @@
 2. 请求气象卫星 JSONP 接口并解析出图片列表。
 3. 以接口返回的时间字符串 `ft` 作为文件名。
 4. 先查询 D1 是否已处理过该 `ft`。
-5. 未处理则下载图片并上传到 Google Drive。
+5. 未处理则下载图片并上传到 Google Drive 的 `china_weather` 文件夹（不存在则自动创建）。
 6. 上传成功后写入 D1，记录已处理。
 
 **目录结构**
@@ -18,7 +18,7 @@
 **前置条件**
 - Cloudflare Workers 账号
 - Cloudflare D1 数据库
-- Google Cloud Service Account（具备 Google Drive 写入权限）
+- Google 账号（通过 [Obsidian Google Drive](https://ogd.richardxiong.com) 获取 refresh token）
 
 **配置步骤**
 1. 安装 Wrangler 并登录
@@ -36,40 +36,18 @@ wrangler d1 create china-weather
 wrangler d1 execute china-weather --file=./schema.sql
 ```
 
-4. 配置环境变量
-- 在 `wrangler.toml` 填入以下变量
-- `GDRIVE_CLIENT_EMAIL` Service Account 邮箱
-- `GDRIVE_FOLDER_ID` 目标文件夹 ID
-
-5. 设置私钥密文
+4. 设置 Google Drive refresh token
 ```
-wrangler secret put GDRIVE_PRIVATE_KEY
+wrangler secret put GDRIVE_REFRESH_TOKEN
 ```
 
-**如何获取 Google Drive 参数**
-1. 创建 Service Account
-- 打开 Google Cloud Console
-- 选择或创建项目
-- 进入 **IAM & Admin → Service Accounts**
-- 点击 **Create Service Account**
-
-2. 生成密钥（JSON）
-- 在 Service Account 详情页打开 **Keys → Add key → Create new key**
-- 选择 JSON 并下载
-- JSON 中 `client_email` 对应 `GDRIVE_CLIENT_EMAIL`
-- JSON 中 `private_key` 对应 `GDRIVE_PRIVATE_KEY`
-
-3. 获取 Google Drive 文件夹 ID
-- 在浏览器打开目标文件夹
-- 地址栏 URL 中 `folders/` 后的字符串即为 ID
-
-4. 授权 Service Account
-- 在 Google Drive 中打开目标文件夹
-- 点击 **共享**
-- 添加 Service Account 邮箱并授予“编辑者”权限
+**如何获取 Refresh Token**
+1. 打开 https://ogd.richardxiong.com
+2. 使用 Google 账号登录并授权
+3. 页面会显示一个 refresh token，复制保存
 
 **注意事项**
-- 目标 Google Drive 文件夹必须共享给 Service Account 邮箱。
+- 图片会自动上传到 Google Drive 根目录下的 `china_weather` 文件夹，首次运行时自动创建。
 - Cron 使用 UTC 时区。当前配置为每 30 分钟执行一次。
 - 如果需要修改频率，编辑 `wrangler.toml` 的 `triggers.crons`。
 
@@ -79,6 +57,19 @@ wrangler deploy
 ```
 
 **本地开发（可选）**
+
+在项目根目录创建 `.dev.vars` 文件：
 ```
+GDRIVE_REFRESH_TOKEN=你的refresh_token
+```
+
+初始化本地 D1 并启动：
+```
+wrangler d1 execute china-weather --local --file=./schema.sql
 wrangler dev
+```
+
+手动触发定时任务：
+```
+curl http://localhost:8787/cdn-cgi/handler/scheduled
 ```

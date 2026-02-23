@@ -11,3 +11,8 @@ wheels/
 
 weather/
 .DS_Store
+.dev.vars
+Obsidian-Google-Drive/
+node_modules/
+.wrangler/
+.claude/
