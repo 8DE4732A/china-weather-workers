@@ -31,6 +31,7 @@ async function handleScheduled(env) {
 
   const accessToken = await getAccessToken(env);
   const folderId = await getOrCreateFolder(accessToken, "china_weather");
+  let uploaded = 0;
   for (const radar of radars) {
     const ft = radar.ft;
     if (!ft) {
@@ -38,7 +39,7 @@ async function handleScheduled(env) {
     }
 
     const imgUrl =
-      "https://pi.weather.com.cn/i/product/pic/m/sevp_nsmc_" +
+      "https://pi.weather.com.cn/i/product/pic/l/sevp_nsmc_" +
       radar.fn +
       "_lno_py_" +
       ft +
@@ -49,6 +50,11 @@ async function handleScheduled(env) {
       continue;
     }
 
+    if (uploaded >= 20) {
+      console.log("Reached upload limit, will continue next run.");
+      break;
+    }
+
     try {
       await uploadImageToDrive({
         accessToken,
@@ -57,6 +63,7 @@ async function handleScheduled(env) {
         imgUrl,
       });
       await markProcessed(env.DB, { ft, fn: radar.fn, imgUrl });
+      uploaded += 1;
       console.log(`Uploaded ${ft}.jpg`);
     } catch (err) {
       console.log(`Failed ${ft}.jpg: ${err?.message || err}`);
@@ -236,7 +243,7 @@ async function listFrames(db, url) {
 
   const rows = await db
     .prepare(
-      "SELECT ft, img_url, created_at FROM processed ORDER BY ft DESC LIMIT ?",
+      "SELECT ft, img_url, created_at FROM (SELECT ft, img_url, created_at FROM processed ORDER BY ft DESC LIMIT ?) ORDER BY ft ASC",
     )
     .bind(limit)
     .all();
