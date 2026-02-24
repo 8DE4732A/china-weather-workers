@@ -1,7 +1,8 @@
-const JSONP_URL = "https://d1.weather.com.cn/satellite2015/JC_YT_DL_WXZXCSYT_4B.html";
-const REFERER = "http://www.weather.com.cn/satellite/";
+const XML_URL =
+  "http://img.nsmc.org.cn/PORTAL/NSMC/XML/FY4B/FY4B_AGRI_IMG_DISK_GCLR_NOM.xml";
+const REFERER = "http://nsmc.org.cn/";
 const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.109 Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 
 export default {
   async scheduled(event, env, ctx) {
@@ -33,17 +34,10 @@ async function handleScheduled(env) {
   const folderId = await getOrCreateFolder(accessToken, "china_weather");
   let uploaded = 0;
   for (const radar of radars) {
-    const ft = radar.ft;
-    if (!ft) {
+    const { ft, imgUrl } = radar;
+    if (!ft || !imgUrl) {
       continue;
     }
-
-    const imgUrl =
-      "https://pi.weather.com.cn/i/product/pic/l/sevp_nsmc_" +
-      radar.fn +
-      "_lno_py_" +
-      ft +
-      ".jpg";
 
     const alreadyProcessed = await isProcessed(env.DB, ft);
     if (alreadyProcessed) {
@@ -62,7 +56,7 @@ async function handleScheduled(env) {
         fileName: `${ft}.jpg`,
         imgUrl,
       });
-      await markProcessed(env.DB, { ft, fn: radar.fn, imgUrl });
+      await markProcessed(env.DB, { ft, fn: ft, imgUrl });
       uploaded += 1;
       console.log(`Uploaded ${ft}.jpg`);
     } catch (err) {
@@ -72,9 +66,7 @@ async function handleScheduled(env) {
 }
 
 async function fetchRadarList() {
-  const ts = Date.now();
-  const url = `${JSONP_URL}?jsoncallback=readSatellite&callback=jQuery18208455971171376718_${ts}&_=${ts}`;
-  const resp = await fetch(url, {
+  const resp = await fetch(XML_URL, {
     headers: {
       Referer: REFERER,
       "User-Agent": USER_AGENT,
@@ -82,23 +74,29 @@ async function fetchRadarList() {
   });
 
   if (!resp.ok) {
-    throw new Error(`Fetch JSONP failed: ${resp.status}`);
+    throw new Error(`Fetch XML failed: ${resp.status}`);
   }
 
   const text = await resp.text();
-  const start = text.indexOf("(");
-  const end = text.lastIndexOf(")");
-  if (start === -1 || end === -1) {
-    throw new Error("Unexpected JSONP format");
+  // Parse XML to extract image URLs
+  const matches = [...text.matchAll(/<image[^>]+url=["']([^"']+)["']/g)];
+  const radars = [];
+  for (const match of matches) {
+    let imgUrl = match[1];
+    if (imgUrl.startsWith('//')) {
+      imgUrl = 'http:' + imgUrl;
+    }
+    const filename = imgUrl.split('/').pop();
+    // fn: prefix before '--', e.g. "FY4B-_AGRI"
+    const fnMatch = filename.match(/^(.+?)--/);
+    const fn = fnMatch ? fnMatch[1] : filename;
+    // ft: first 14-digit timestamp, e.g. "20260221114500"
+    const ftMatch = filename.match(/(\d{14})/);
+    if (!ftMatch) continue;
+    const ft = ftMatch[1];
+    radars.push({ ft, fn, imgUrl });
   }
-
-  const jsonText = text.slice(start + 1, end).replace(/'/g, '"');
-  const payload = JSON.parse(jsonText);
-  if (!payload.radars) {
-    return [];
-  }
-
-  return payload.radars;
+  return radars;
 }
 
 async function isProcessed(db, ft) {
@@ -263,7 +261,8 @@ async function proxyImage(url, ctx) {
   }
 
   const target = new URL(imgUrl);
-  if (target.hostname !== "pi.weather.com.cn") {
+  const allowedHosts = ["pi.weather.com.cn", "img.nsmc.org.cn"];
+  if (!allowedHosts.includes(target.hostname)) {
     return new Response("Forbidden", { status: 403 });
   }
 
